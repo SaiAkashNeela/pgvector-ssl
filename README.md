@@ -96,6 +96,17 @@ docker buildx build -f Dockerfile.pgvector \
   -t postgres-ssl-pgvector:17 --push .
 ```
 
+## Image tags
+
+Published to `ghcr.io/saiakashneela/pgvector-ssl` on every merge to main:
+
+- `0.8.6-pg17` — exact pgvector + Postgres major (recommended for production)
+- `pg17` — latest pgvector for that Postgres major
+- `latest` — latest pgvector on the default major (17)
+
+A daily workflow opens a PR whenever upstream pgvector releases a new
+version; merging it rebuilds and republishes all tags.
+
 ## How it works
 
 | File | Runs | Does |

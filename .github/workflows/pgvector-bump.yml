@@ -1,0 +1,91 @@
+# Watches upstream pgvector releases and opens a PR bumping this image.
+# Merging the PR triggers build-and-push.yml, which publishes the new tags.
+name: pgvector version bump
+
+on:
+  schedule:
+    - cron: "30 2 * * *"  # daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  PG_MAJORS: "16 17 18"
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve latest upstream pgvector release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api repos/pgvector/pgvector/releases/latest --jq .tag_name)
+          ver="${tag#v}"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "latest upstream pgvector: $ver"
+
+      - name: Compare with Dockerfile default
+        id: check
+        run: |
+          set -euo pipefail
+          current=$(grep -E '^ARG PGVECTOR_VERSION=' Dockerfile.pgvector | cut -d= -f2)
+          latest="${{ steps.upstream.outputs.version }}"
+          echo "current=$current latest=$latest"
+          if [ "$(printf '%s\n' "$current" "$latest" | sort -V | tail -1)" = "$latest" ] \
+            && [ "$current" != "$latest" ]; then
+            echo "bump=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Upstream publishes one image per Postgres major; a major can lag a
+      # release by hours. Only claim majors whose image actually exists.
+      - name: Verify upstream images exist for supported majors
+        id: majors
+        if: steps.check.outputs.bump == 'true'
+        run: |
+          set -euo pipefail
+          ver="${{ steps.upstream.outputs.version }}"
+          ok=""
+          for major in $PG_MAJORS; do
+            if curl -fsSL "https://hub.docker.com/v2/repositories/pgvector/pgvector/tags/${ver}-pg${major}" -o /dev/null; then
+              ok="$ok $major"
+            else
+              echo "::warning::pgvector/pgvector:${ver}-pg${major} not published yet; skipping major ${major}"
+            fi
+          done
+          ok="$(echo "$ok" | xargs)"
+          [ -n "$ok" ] || { echo "::error::no upstream images for pgvector $ver"; exit 1; }
+          echo "majors=$ok" >> "$GITHUB_OUTPUT"
+          echo "verified majors:$ok"
+
+      - name: Open bump PR
+        if: steps.check.outputs.bump == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          current=$(grep -E '^ARG PGVECTOR_VERSION=' Dockerfile.pgvector | cut -d= -f2)
+          latest="${{ steps.upstream.outputs.version }}"
+          majors="${{ steps.majors.outputs.majors }}"
+          branch="pgvector-bump-${latest}"
+          if gh pr list --head "$branch" --json number --jq '.[0].number' | grep -qE '^[0-9]+$'; then
+            echo "PR already open for $latest; nothing to do"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          sed -i "s/^ARG PGVECTOR_VERSION=.*/ARG PGVECTOR_VERSION=${latest}/" Dockerfile.pgvector
+          sed -i "s/${current//./\\.}/${latest}/g" README.md
+          git add Dockerfile.pgvector README.md
+          git commit -m "Bump pgvector ${current} -> ${latest}"
+          git push origin "$branch"
+          gh pr create --title "Bump pgvector ${current} -> ${latest}" --body "Upstream release [\`${latest}\`](https://github.com/pgvector/pgvector/releases). Upstream images verified for PG majors:${majors}. Merging rebuilds and republishes \`ghcr.io/saiakashneela/pgvector-ssl\` (per-major, floating, and \`latest\` tags)."
