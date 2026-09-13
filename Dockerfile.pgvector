@@ -1,0 +1,62 @@
+# SSL-enabled pgvector image with the `vector` extension auto-enabled.
+#
+# Built FROM the official pgvector image (itself built FROM the official
+# postgres image, so the standard docker-entrypoint.sh, gosu, pg_isready
+# and psql are all present), plus this variant's own scripts for
+# self-signed SSL and automatic vector enablement:
+#   ssl-init.sh          — generates a self-signed CA + server certificate
+#                          and enables ssl during initdb.
+#   init-pgvector.sh     — CREATEs the vector extension in template1 (so
+#                          every future database inherits it) and in the
+#                          initial databases during initdb, then rebuilds
+#                          template0 as a clone of template1.
+#   wrapper-pgvector.sh  — entrypoint: regenerates the certificate when it
+#                          is missing or expires within 30 days, keeps the
+#                          template0 clone and the vector extension ensured
+#                          every few minutes, then hands off to the official
+#                          entrypoint.
+#
+# Stands alone: uses no other file in this repo.
+#
+# Build (defaults to pgvector 0.8.6 on PG 17):
+#   docker build -f Dockerfile.pgvector -t postgres-ssl-pgvector:17 .
+# Another pgvector / Postgres combo:
+#   docker build -f Dockerfile.pgvector \
+#     --build-arg PGVECTOR_VERSION=0.8.6 --build-arg PG_MAJOR=18 \
+#     -t postgres-ssl-pgvector:18 .
+#
+# Knobs:
+#   PGVECTOR_AUTO_INSTALL_DISABLED=1 — skip auto-enable and the
+#     template1-only lock (binaries stay installed; SSL is unaffected).
+#   PGVECTOR_ENSURE_INTERVAL_SECONDS — how often the boot-time ensure
+#     re-runs (default 300; 0 = once at boot).
+#   SSL_CERT_DAYS — certificate validity period (default 820).
+ARG PGVECTOR_VERSION=0.8.6
+ARG PG_MAJOR=17
+FROM pgvector/pgvector:${PGVECTOR_VERSION}-pg${PG_MAJOR}
+
+# openssl generates the self-signed certificates; tini is PID 1 so the stop
+# signal reaches postgres for a clean shutdown and background helpers get
+# reaped (see ENTRYPOINT below).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Only the variant's own scripts — nothing else from this repo.
+COPY --chmod=755 ssl-init.sh /docker-entrypoint-initdb.d/ssl-init.sh
+COPY --chmod=755 init-pgvector.sh /docker-entrypoint-initdb.d/init-pgvector.sh
+COPY --chmod=755 wrapper-pgvector.sh /usr/local/bin/wrapper-pgvector.sh
+
+# tini is PID 1. The runtime stops a container by signaling PID 1 only; a
+# shell there with no handler drops the signal, and the stop ends in SIGKILL
+# once the grace period runs out — every restart becomes a hard kill and the
+# next boot a WAL crash recovery. wrapper-pgvector.sh cannot simply exec the
+# official entrypoint either: it forks a background ensure helper that exec
+# would re-parent onto the postmaster, which PANICs on its SIGCHLD. tini -g
+# delivers the stop signal to the wrapper's process group (the wrapper and
+# the postgres it runs in the foreground), reaps the helper when it exits,
+# and exits with the wrapper's status. SIGINT is postgres's fast-shutdown
+# signal.
+STOPSIGNAL SIGINT
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/wrapper-pgvector.sh"]
+CMD ["postgres", "-p", "5432", "-c", "listen_addresses=*"]
