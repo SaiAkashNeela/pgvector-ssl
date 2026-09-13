@@ -104,8 +104,9 @@ Published to `ghcr.io/saiakashneela/pgvector-ssl` on every merge to main:
 - `pg17` — latest pgvector for that Postgres major
 - `latest` — latest pgvector on the default major (17)
 
-A daily workflow opens a PR whenever upstream pgvector releases a new
-version; merging it rebuilds and republishes all tags.
+A weekly workflow (every Sunday) opens a PR whenever upstream pgvector releases a new
+version; merging it rebuilds and republishes all tags. Weeks with no new
+release do nothing — no PR, no rebuild, digests stay put.
 
 ## How it works
 
