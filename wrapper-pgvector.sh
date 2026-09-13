@@ -123,7 +123,13 @@ fork_pgvector_ensure() {
   (
     trap '' INT TERM  # background helper: never catch the stop signal mid-statement
     i=0
-    while ! gosu postgres pg_isready -q 2>/dev/null; do
+    # Probe as the cluster's actual superuser against template1: a bare
+    # pg_isready targets the postgres role and database, neither of which
+    # necessarily exists on a custom-POSTGRES_USER cluster (initdb only
+    # creates the postgres *database*, and the entrypoint initdb's with
+    # --username="$POSTGRES_USER", so the postgres *role* is absent) — the
+    # probe would report "rejecting" forever and the ensure would never run.
+    while ! gosu postgres pg_isready -q -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" -d template1 2>/dev/null; do
       sleep 2
       i=$((i + 1))
       [ "$i" -ge 120 ] && exit 0
@@ -226,7 +232,7 @@ ENDSQL
       # exist yet.
       _pgv_psql -v ON_ERROR_STOP=0 -qAt -d template1 -c "$ensure_sql" 2>&1 \
         | while IFS= read -r line; do [ -n "$line" ] && echo "pgvector-ensure: [template1] $line"; done
-      dbs=$(_pgv_psql -qAt -c "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate" 2>/dev/null) || return 0
+      dbs=$(_pgv_psql -qAt -d template1 -c "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate" 2>/dev/null) || return 0
       while IFS= read -r db; do
         [ -z "$db" ] && continue
         _pgv_psql -v ON_ERROR_STOP=0 -qAt -d "$db" -c "$ensure_sql" 2>&1 \
